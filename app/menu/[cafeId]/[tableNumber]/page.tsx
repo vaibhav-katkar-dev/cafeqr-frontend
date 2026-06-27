@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import { useParams } from "next/navigation";
+
 import { useCart } from "@/context/CartContext";
 import api from "@/lib/api";
 import { toast } from "sonner";
@@ -56,6 +57,34 @@ export default function CustomerMenuPage() {
   const params = useParams();
   const cafeId = params?.cafeId as string;
   const tableNumber = Number(params?.tableNumber);
+
+  const SESSION_TOKEN_KEY = "cafe_qr_sessionToken";
+
+  const ensureSessionToken = () => {
+    if (typeof window === "undefined") return "";
+    let token = window.sessionStorage.getItem(SESSION_TOKEN_KEY);
+    if (!token) {
+      // Avoid crypto.randomUUID not supported in older browsers
+      token = `st_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+      window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    }
+    return token;
+  };
+
+  const generateOrderKey = (sessionToken: string) => {
+    // Generate a unique ID per order attempt. Network retries will automatically 
+    // reuse this key since the payload is already constructed.
+    return `${sessionToken}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  };
+
+  const handleNewPerson = () => {
+    window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    clearCart();
+    setCustomerName("");
+    toast.info("New person session started.");
+  };
+
+
 
   const {
     cart,
@@ -170,9 +199,25 @@ export default function CustomerMenuPage() {
     setCheckoutLoading(true);
 
     try {
+      const sessionToken = ensureSessionToken();
+      const orderKey = generateOrderKey(sessionToken);
+
+      // Always ask backend to resume-or-create to recover from tab close / phone reboot
+      // Backend will decide whether to reuse an existing active session or create a new one.
+      const resumeRes = await api.post("/sessions/resume-or-create", {
+        cafeId,
+        tableNumber,
+        // backend validates optional; keep consistent
+        sessionToken,
+      });
+
+
+      const { action, sessionId } = resumeRes.data || {};
       const orderPayload = {
         cafeId,
         tableNumber,
+        // Attach to the specific session (strict) when backend returns it
+        ...(sessionId ? { sessionId } : {}),
         items: cart.map((item: any) => ({
           itemId: item.itemId,
           name: item.name,
@@ -181,9 +226,16 @@ export default function CustomerMenuPage() {
         })),
         customerName: customerName.trim(),
         customerNote: note,
+
+        // Bulletproof separate-bills
+        sessionToken,
+
+        // Idempotency
+        orderKey,
       };
 
       const res = await api.post("/orders", orderPayload);
+
       setPlacedOrder({
         id: res.data.orderId,
         items: [...cart],
@@ -315,7 +367,16 @@ export default function CustomerMenuPage() {
         {/* Service Action Buttons */}
         <div className="max-w-2xl mx-auto px-4 pb-4 flex gap-3">
           <Button
+            onClick={handleNewPerson}
+            variant="outline"
+            size="sm"
+            className="flex-1 rounded-xl text-xs font-bold border-slate-200 text-slate-700 bg-white hover:bg-slate-50 shadow-sm"
+          >
+            New Person
+          </Button>
+          <Button
             onClick={handleCallWaiter}
+
             disabled={callingWaiter}
             variant="outline"
             size="sm"
@@ -503,11 +564,11 @@ export default function CustomerMenuPage() {
             </div>
 
             <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
-              <SheetTrigger render={
-                <Button className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs px-5 py-5 rounded-xl flex items-center gap-1.5 shadow-lg shadow-emerald-500/10">
-                  View Order <ChevronRight className="w-4 h-4" />
-                </Button>
-              } />
+              <SheetTrigger asChild>
+  <Button className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs px-5 py-5 rounded-xl flex items-center gap-1.5 shadow-lg shadow-emerald-500/10">
+    View Order <ChevronRight className="w-4 h-4" />
+  </Button>
+</SheetTrigger>
               <SheetContent side="bottom" className="rounded-t-[30px] p-6 max-h-[85vh] overflow-y-auto max-w-xl mx-auto border-t border-slate-100">
                 <SheetHeader className="text-left space-y-1 mb-4">
                   <SheetTitle className="text-xl font-black text-slate-900 flex justify-between items-center">

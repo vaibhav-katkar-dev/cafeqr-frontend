@@ -79,8 +79,14 @@ export default function TablesPage() {
   const [cafeName, setCafeName] = useState("My Cafe");
   const [loadingTables, setLoadingTables] = useState(true);
 
-  const [selectedSession, setSelectedSession] = useState<TableSession | null>(null);
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [selectedTable, setSelectedTable] = useState<number | null>(null);
+  
+  // Safety Rules states
+  const [settlingIds, setSettlingIds] = useState<Set<string>>(new Set());
+  const [isSettlingAll, setIsSettlingAll] = useState(false);
+  const [personPickerOpen, setPersonPickerOpen] = useState(false);
+  const [selectedSessionIdForAdd, setSelectedSessionIdForAdd] = useState<string>("");
+
   const [qrModal, setQrModal] = useState<QRData | null>(null);
 
   // Add Item to Bill state
@@ -117,146 +123,171 @@ export default function TablesPage() {
     }
   }, [user]);
 
-  const handleCheckout = async (sessionId: string) => {
-    if (!window.confirm("Are you sure you want to settle this bill and clear the table? This action cannot be undone.")) return;
+  const getSessionOrders = useCallback((sessionId: string) => {
+    return orders.filter((o: any) => o.sessionId === sessionId && o.status !== "cancelled");
+  }, [orders]);
+
+  const getSessionTotal = useCallback((sessionId: string) => {
+    return getSessionOrders(sessionId).reduce((sum, order) => {
+      return sum + order.items.reduce((s: number, i: any) => s + i.price * i.quantity, 0);
+    }, 0);
+  }, [getSessionOrders]);
+
+  const handleCheckoutSingle = async (sessionId: string, personLabel: string) => {
+    if (settlingIds.has(sessionId) || isSettlingAll) return;
+
+    const session = sessions.find(s => s.id === sessionId);
+    if (!session || session.status !== "active") {
+      toast.error("Session already checked out or invalid.");
+      return;
+    }
+
+    const sessOrders = getSessionOrders(sessionId);
+    const pending = sessOrders.filter((o: any) => ["pending", "accepted", "preparing"].includes(o.status));
     
+    if (pending.length > 0) {
+      if (!window.confirm(`${personLabel} has ${pending.length} orders still being prepared. Settle anyway?`)) {
+        return;
+      }
+    } else {
+      if (!window.confirm(`Are you sure you want to settle ${personLabel}?`)) return;
+    }
+
     try {
-      setCheckoutLoading(true);
+      setSettlingIds(prev => new Set(prev).add(sessionId));
       await api.patch(`/sessions/${sessionId}/checkout`);
-      toast.success("Table checked out & bill settled!");
-      setSelectedSession(null);
-    } catch {
-      toast.error("Failed to checkout table");
+      toast.success(`${personLabel} settled!`);
+    } catch (err: any) {
+      toast.error(`Failed to settle ${personLabel}`);
     } finally {
-      setCheckoutLoading(false);
+      setSettlingIds(prev => {
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
     }
   };
 
-  const handlePrintBill = (session: TableSession) => {
+  const handleCheckoutAll = async (tableSessions: TableSession[]) => {
+    if (isSettlingAll || settlingIds.size > 0) return;
+
+    let totalPending = 0;
+    for (const session of tableSessions) {
+      const sessOrders = getSessionOrders(session.id);
+      const pending = sessOrders.filter((o: any) => ["pending", "accepted", "preparing"].includes(o.status));
+      totalPending += pending.length;
+    }
+
+    if (totalPending > 0) {
+      if (!window.confirm(`This table has ${totalPending} orders still being prepared. Settle everyone anyway?`)) {
+        return;
+      }
+    } else {
+      if (!window.confirm(`Are you sure you want to settle ALL persons at Table ${selectedTable}?`)) return;
+    }
+
+    setIsSettlingAll(true);
+    let hasError = false;
+
+    for (let i = 0; i < tableSessions.length; i++) {
+      const session = tableSessions[i];
+      const personLabel = `Person ${i + 1}`;
+      try {
+        setSettlingIds(prev => new Set(prev).add(session.id));
+        await api.patch(`/sessions/${session.id}/checkout`);
+        toast.success(`${personLabel} settled!`);
+      } catch (err: any) {
+        toast.error(`Failed to settle ${personLabel}. Stopping.`);
+        hasError = true;
+        break;
+      } finally {
+        setSettlingIds(prev => {
+          const next = new Set(prev);
+          next.delete(session.id);
+          return next;
+        });
+      }
+    }
+
+    setIsSettlingAll(false);
+    if (!hasError) {
+      setSelectedTable(null);
+    }
+  };
+
+  const handlePrintBill = (tableNumber: number) => {
+    const escapeHtml = (str: any) =>
+     String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
     const printWindow = window.open("", "_blank");
     if (!printWindow) {
       toast.error("Popup blocker prevented printing. Please allow popups.");
       return;
     }
 
-    const tableOrders = orders.filter((order: any) => order.tableNumber === session.tableNumber && order.status !== "cancelled");
-    const currentSessionOrders = tableOrders.filter((order: any) => order.sessionId === session.id);
-    const previousSessionOrders = tableOrders.filter((order: any) => order.sessionId !== session.id);
+    const tableOrders = orders.filter((order: any) => order.tableNumber === tableNumber && order.status !== "cancelled");
+    const activeSessions = sessions.filter(s => s.tableNumber === tableNumber && s.status === "active");
+    const activeSessionIds = activeSessions.map(s => s.id);
+
+    const currentSessionOrders = tableOrders.filter((order: any) => activeSessionIds.includes(order.sessionId));
 
     const renderOrderRows = (sessionGroup: any[]) =>
       sessionGroup.flatMap((order) =>
-        order.items.map((item: any) => `
-          <tr>
-            <td style="padding: 6px 0; font-size: 14px;">${item.name}</td>
-            <td style="padding: 6px 0; text-align: center; font-size: 14px;">x${item.quantity}</td>
-            <td style="padding: 6px 0; text-align: right; font-size: 14px;">₹${Number(item.price).toFixed(0)}</td>
-            <td style="padding: 6px 0; text-align: right; font-size: 14px; font-weight: bold;">₹${(Number(item.price) * Number(item.quantity)).toFixed(0)}</td>
-          </tr>
-        `)
+        order.items.map((item: any) => `<tr>
+          <td style="padding:2px 0;font-size:11px;">${escapeHtml(item.name)}</td>
+          <td style="padding:2px 0;text-align:center;font-size:11px;">${escapeHtml(item.quantity)}</td>
+          <td style="padding:2px 0;text-align:right;font-size:11px;">${Number(item.price).toFixed(0)}</td>
+          <td style="padding:2px 0;text-align:right;font-size:11px;font-weight:bold;">${(Number(item.price) * Number(item.quantity)).toFixed(0)}</td>
+        </tr>`)
       ).join("");
 
-    const billTotal = tableOrders.reduce((sum: number, order: any) => {
+    const billTotal = currentSessionOrders.reduce((sum: number, order: any) => {
       return sum + order.items.reduce((itemSum: number, item: any) => itemSum + (Number(item.price) * Number(item.quantity)), 0);
     }, 0);
 
     const pendingCount = currentSessionOrders.filter((order) => ["pending", "accepted", "preparing"].includes(order.status)).length;
 
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Bill - Table ${session.tableNumber}</title>
-          <style>
-            body {
-              font-family: 'Courier New', Courier, monospace;
-              padding: 10px;
-              width: 320px;
-              color: #000;
-              margin: 0;
-            }
-            .header {
-              text-align: center;
-              border-bottom: 2px dashed #000;
-              padding-bottom: 10px;
-              margin-bottom: 10px;
-            }
-            .title {
-              font-size: 20px;
-              font-weight: bold;
-              margin: 4px 0;
-            }
-            .details {
-              font-size: 12px;
-              margin-bottom: 10px;
-              line-height: 1.4;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              margin-bottom: 10px;
-            }
-            .totals {
-              border-top: 1px dashed #000;
-              padding-top: 6px;
-              font-weight: bold;
-              margin-top: 6px;
-            }
-            .note {
-              background: #eee;
-              padding: 8px;
-              font-size: 12px;
-              margin-top: 10px;
-              border-left: 3px solid #000;
-            }
-            @media print {
-              body { width: 100%; }
-            }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <div class="title">RUNNING BILL</div>
-            <div style="font-size: 12px; margin-top: 2px;">Table Number</div>
-            <div style="font-size: 32px; font-weight: 900; margin: 4px 0;">TABLE ${session.tableNumber}</div>
-          </div>
-          <div class="details">
-            <div>Session: #${session.id.slice(-6).toUpperCase()}</div>
-            <div>Time: ${session.createdAt.toLocaleTimeString()}</div>
-            <div>Date: ${session.createdAt.toLocaleDateString()}</div>
-            <div style="margin-top: 6px; font-weight: bold;">Includes past items and newly added items in this session</div>
-          </div>
-          <table>
-            <thead>
-              <tr style="border-bottom: 1px solid #000;">
-                <th style="text-align: left; padding-bottom: 4px; font-size: 12px;">ITEM</th>
-                <th style="text-align: center; padding-bottom: 4px; font-size: 12px;">QTY</th>
-                <th style="text-align: right; padding-bottom: 4px; font-size: 12px;">RATE</th>
-                <th style="text-align: right; padding-bottom: 4px; font-size: 12px;">AMT</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${currentSessionOrders.length > 0 ? `<tr><td colspan="4" style="padding: 6px 0 10px; font-size: 12px; font-weight: bold; text-transform: uppercase;">Current Bill</td></tr>${renderOrderRows(currentSessionOrders)}` : ""}
-              ${previousSessionOrders.length > 0 ? `<tr><td colspan="4" style="padding: 10px 0 6px; font-size: 12px; font-weight: bold; text-transform: uppercase; border-top: 1px dashed #000;">Previous Settled Items</td></tr>${renderOrderRows(previousSessionOrders)}` : ""}
-            </tbody>
-          </table>
-          <div class="totals">
-            <div style="display: flex; justify-content: space-between; font-size: 14px;">
-              <span>TOTAL</span>
-              <span>₹${billTotal.toFixed(2)}</span>
-            </div>
-          </div>
-          ${pendingCount > 0 ? `<div class="note"><strong>NOTE:</strong> ${pendingCount} order${pendingCount > 1 ? "s are" : " is"} still in progress.</div>` : ""}
-          <div style="text-align: center; margin-top: 20px; font-size: 10px; border-top: 1px dashed #000; padding-top: 10px;">
-            CafeQR SaaS • Running Bill
-          </div>
-          <script>
-            window.onload = function() {
-              window.print();
-              setTimeout(function() { window.close(); }, 500);
-            };
-          </script>
-        </body>
-      </html>
-    `);
+    printWindow.document.write(`<html><head><title>Bill</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Courier New',monospace;padding:4px;width:48mm;color:#000;font-size:11px;line-height:1.3}
+.hdr{text-align:center;border-bottom:1px dashed #000;padding-bottom:4px;margin-bottom:4px}
+.hdr .t{font-size:13px;font-weight:900;letter-spacing:1px}
+.hdr .tbl{font-size:22px;font-weight:900;margin:2px 0}
+.det{font-size:10px;margin-bottom:4px}
+table{width:100%;border-collapse:collapse}
+th{font-size:9px;padding-bottom:2px;border-bottom:1px solid #000}
+.tot{border-top:1px dashed #000;padding-top:3px;margin-top:3px;display:flex;justify-content:space-between;font-size:13px;font-weight:900}
+.nt{background:#eee;padding:3px 4px;font-size:9px;margin-top:4px;border-left:2px solid #000}
+.ft{text-align:center;margin-top:6px;font-size:8px;border-top:1px dashed #000;padding-top:4px;color:#555}
+@media print{body{width:100%}@page{margin:0}}
+</style></head><body>
+<div class="hdr">
+<div class="t">BILL</div>
+<div class="tbl">T-${escapeHtml(tableNumber)}</div>
+</div>
+<div class="det">
+${new Date().toLocaleDateString()} | ${new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+</div>
+<table>
+<thead><tr>
+<th style="text-align:left">Item</th>
+<th style="text-align:center;width:20px">Qt</th>
+<th style="text-align:right;width:30px">Rate</th>
+<th style="text-align:right;width:34px">Amt</th>
+</tr></thead>
+<tbody>${renderOrderRows(currentSessionOrders)}</tbody>
+</table>
+<div class="tot"><span>TOTAL</span><span>&#8377;${billTotal.toFixed(0)}</span></div>
+${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} order${pendingCount > 1 ? "s" : ""} still in progress</div>` : ""}
+<div class="ft">CafeQR</div>
+<script>window.onload=function(){window.print();setTimeout(function(){window.close()},500)};</script>
+</body></html>`);
     printWindow.document.close();
   };
 
@@ -309,8 +340,14 @@ export default function TablesPage() {
   };
 
   const handleAddItemsSubmit = async () => {
-    if (!selectedSession || itemsToAdd.length === 0) return;
+    if (!selectedSessionIdForAdd || itemsToAdd.length === 0) return;
     
+    const stillActive = sessions.find(s => s.id === selectedSessionIdForAdd && s.status === 'active');
+    if (!stillActive) {
+      toast.error("This person already checked out. Please refresh.");
+      return;
+    }
+
     setAddingItems(true);
     try {
       const formattedItems = itemsToAdd.map(i => ({
@@ -321,10 +358,11 @@ export default function TablesPage() {
       }));
 
       await api.post("/orders/manager", {
-        tableNumber: selectedSession.tableNumber,
+        sessionId: selectedSessionIdForAdd,
+        tableNumber: selectedTable,
         items: formattedItems
       });
-      
+
       toast.success(`${itemsToAdd.reduce((s, i) => s + i.quantity, 0)} item(s) added to bill!`);
       setAddItemModalOpen(false);
       setItemsToAdd([]);
@@ -422,27 +460,48 @@ export default function TablesPage() {
     };
   };
 
-  // --- Derived data ---
   const tables = useMemo(() => {
     const arr = [];
     for (let i = 1; i <= tableCount; i++) {
-      const session = sessions.find((s) => s.tableNumber === i) || null;
-      const qr = qrCodes.find((q) => q.table === i) || null;
-      // Orders linked to this session
-      const tableOrders = session
-        ? orders.filter((o: any) => o.sessionId === session.id)
-        : [];
+      const activeTableSessions = sessions.filter(s => s.tableNumber === i && s.status === 'active');
+      const activeSessionIds = activeTableSessions.map(s => s.id);
+      const allTableOrders = orders.filter((o: any) => o.tableNumber === i && o.status !== "cancelled");
+      
+      // Only include orders that belong to an active session, OR have absolutely no session (true orphans)
+      const tableOrders = allTableOrders.filter((o: any) => 
+        activeSessionIds.includes(o.sessionId) || !o.sessionId
+      );
+      
       const pendingCount = tableOrders.filter((o: any) => ["pending", "accepted", "preparing"].includes(o.status)).length;
       const deliveredCount = tableOrders.filter((o: any) => o.status === "delivered").length;
       const totalItems = tableOrders.reduce((s: number, o: any) => s + o.items.reduce((n: number, it: any) => n + it.quantity, 0), 0);
-      arr.push({ number: i, session, qr, tableOrders, pendingCount, deliveredCount, totalItems });
+      
+      const earliestSession = activeTableSessions.sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime())[0] || null;
+      const totalTableAmount = activeTableSessions.reduce((sum, s) => sum + (s.totalAmount || 0), 0) + 
+        tableOrders.filter(o => !o.sessionId).reduce((sum, o) => sum + o.items.reduce((s: number, it: any) => s + it.price * it.quantity, 0), 0);
+        
+      const isOccupied = activeTableSessions.length > 0 || tableOrders.filter(o => !o.sessionId).length > 0;
+      const qr = qrCodes.find((q) => q.table === i) || null;
+      
+      arr.push({ 
+        number: i, 
+        session: earliestSession, 
+        isOccupied,
+        totalTableAmount,
+        activeSessions: activeTableSessions,
+        qr, 
+        tableOrders, 
+        pendingCount, 
+        deliveredCount, 
+        totalItems 
+      });
     }
     return arr;
   }, [tableCount, sessions, qrCodes, orders]);
 
   // Overall metrics
-  const occupiedTables = tables.filter((t) => t.session).length;
-  const freeTables = tables.filter((t) => !t.session).length;
+  const occupiedTables = tables.filter((t) => t.isOccupied).length;
+  const freeTables = tables.filter((t) => !t.isOccupied).length;
   const occupancyRate = tableCount > 0 ? Math.round((occupiedTables / tableCount) * 100) : 0;
   const totalLiveRevenue = sessions.reduce((s, sess) => s + (sess.totalAmount || 0), 0);
   const avgBill = occupiedTables > 0 ? totalLiveRevenue / occupiedTables : 0;
@@ -451,10 +510,6 @@ export default function TablesPage() {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const todayOrders = orders.filter((o: any) => o.createdAt >= today);
   const todayRevenue = todayOrders.reduce((s: number, o: any) => s + o.totalPrice, 0);
-
-  const selectedSessionOrders = selectedSession
-    ? orders.filter((o: any) => o.sessionId === selectedSession.id)
-    : [];
 
   if (loadingTables || sessionsLoading) {
     return (
@@ -498,7 +553,6 @@ export default function TablesPage() {
 
       {/* ── Owner Metrics Strip ── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3">
-        {/* Total Tables */}
         <div className="bg-white border border-slate-100 rounded-xl sm:rounded-2xl p-3 sm:p-4 shadow-sm flex items-center gap-2 sm:gap-3">
           <div className="w-8 h-8 sm:w-9 sm:h-9 bg-slate-100 text-slate-600 rounded-lg sm:rounded-xl flex items-center justify-center flex-shrink-0">
             <Table2 size={15} />
@@ -509,7 +563,6 @@ export default function TablesPage() {
           </div>
         </div>
 
-        {/* Free */}
         <div className="bg-emerald-50 border border-emerald-100 rounded-xl sm:rounded-2xl p-3 sm:p-4 shadow-sm flex items-center gap-2 sm:gap-3">
           <div className="w-8 h-8 sm:w-9 sm:h-9 bg-emerald-100 text-emerald-600 rounded-lg sm:rounded-xl flex items-center justify-center flex-shrink-0">
             <CheckCircle2 size={15} />
@@ -520,7 +573,6 @@ export default function TablesPage() {
           </div>
         </div>
 
-        {/* Occupied */}
         <div className="bg-amber-50 border border-amber-100 rounded-xl sm:rounded-2xl p-3 sm:p-4 shadow-sm flex items-center gap-2 sm:gap-3">
           <div className="w-8 h-8 sm:w-9 sm:h-9 bg-amber-100 text-amber-600 rounded-lg sm:rounded-xl flex items-center justify-center flex-shrink-0">
             <Users size={15} />
@@ -534,7 +586,6 @@ export default function TablesPage() {
           </div>
         </div>
 
-        {/* Live Revenue (running sessions) */}
         <div className="bg-blue-50 border border-blue-100 rounded-xl sm:rounded-2xl p-3 sm:p-4 shadow-sm flex items-center gap-2 sm:gap-3">
           <div className="w-8 h-8 sm:w-9 sm:h-9 bg-blue-100 text-blue-600 rounded-lg sm:rounded-xl flex items-center justify-center flex-shrink-0">
             <IndianRupee size={15} />
@@ -546,7 +597,6 @@ export default function TablesPage() {
           </div>
         </div>
 
-        {/* Today's Revenue */}
         <div className="bg-purple-50 border border-purple-100 rounded-xl sm:rounded-2xl p-3 sm:p-4 shadow-sm flex items-center gap-2 sm:gap-3 col-span-2 sm:col-span-1">
           <div className="w-8 h-8 sm:w-9 sm:h-9 bg-purple-100 text-purple-600 rounded-lg sm:rounded-xl flex items-center justify-center flex-shrink-0">
             <TrendingUp size={15} />
@@ -587,7 +637,7 @@ export default function TablesPage() {
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
           {tables.map((table) => {
-            const isOccupied = !!table.session;
+            const isOccupied = table.isOccupied;
             const seatedMins = table.session
               ? Math.floor((new Date().getTime() - table.session.createdAt.getTime()) / 60000)
               : 0;
@@ -603,15 +653,13 @@ export default function TablesPage() {
                       : "border-amber-300 bg-gradient-to-b from-amber-50 to-orange-50/40 hover:border-amber-400 hover:shadow-lg hover:shadow-amber-100"
                     : "border-emerald-100 bg-gradient-to-b from-white to-emerald-50/30 hover:border-emerald-300 hover:shadow-md hover:shadow-emerald-50"
                 }`}
-                onClick={() => table.session && setSelectedSession(table.session)}
+                onClick={() => setSelectedTable(table.number)}
               >
-                {/* Status dot */}
                 <div className={`absolute top-2.5 right-2.5 w-2.5 h-2.5 rounded-full shadow-sm ${
                   isOccupied ? (isLongStay ? "bg-red-500 shadow-red-300" : "bg-amber-500 shadow-amber-300") : "bg-emerald-500 shadow-emerald-300"
                 } ${isOccupied ? "animate-pulse" : ""}`} />
 
                 <CardContent className="p-3 sm:p-4 flex flex-col items-center justify-start text-center space-y-2 sm:space-y-2.5 flex-1">
-                  {/* Table Number Circle */}
                   <div className={`w-13 h-13 w-14 h-14 rounded-2xl flex items-center justify-center font-black text-2xl shadow-md border-2 transition-all ${
                     isOccupied
                       ? isLongStay
@@ -622,7 +670,6 @@ export default function TablesPage() {
                     {table.number}
                   </div>
 
-                  {/* Status Label */}
                   <Badge className={`text-[10px] font-bold w-full justify-center py-1 border-none ${
                     isOccupied
                       ? isLongStay
@@ -633,18 +680,15 @@ export default function TablesPage() {
                     {isOccupied ? (isLongStay ? "⏰ Long Stay" : "● Occupied") : "✓ Free"}
                   </Badge>
 
-                  {/* Bill Amount */}
                   {isOccupied && table.session ? (
                     <div className="w-full space-y-1.5">
                       <div className="text-xl font-black text-slate-900 leading-tight">
-                        ₹{(table.session.totalAmount || 0).toFixed(0)}
+                        ₹{table.totalTableAmount.toFixed(0)}
                       </div>
-                      {/* Time seated */}
                       <div className="flex items-center justify-center gap-1 text-[10px] text-slate-500 font-semibold">
                         <Timer size={9} className="text-slate-400" />
                         <LiveTimer startDate={table.session.createdAt} />
                       </div>
-                      {/* Order summary pills */}
                       <div className="flex items-center justify-center gap-1 flex-wrap pt-0.5">
                         {table.pendingCount > 0 && (
                           <span className="inline-flex items-center gap-0.5 text-[9px] bg-amber-100 text-amber-700 font-bold rounded-full px-1.5 py-0.5">
@@ -667,10 +711,8 @@ export default function TablesPage() {
                     <div className="text-[11px] font-semibold text-slate-400">Ready to seat</div>
                   )}
 
-                  {/* Spacer to push buttons down */}
                   <div className="flex-1 w-full" />
 
-                  {/* QR Buttons */}
                   {table.qr && (
                     <div className="flex gap-1.5 w-full pt-4 mt-auto border-t border-slate-200/60">
                       <Button
@@ -711,8 +753,6 @@ export default function TablesPage() {
       }}>
         <DialogContent showCloseButton={false} className="w-[95vw] max-w-md p-0 overflow-hidden gap-0 rounded-2xl">
           <div className="flex flex-col max-h-[90vh]">
-
-            {/* Header */}
             <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-100 flex-shrink-0">
               <div>
                 <DialogTitle className="text-lg font-black text-slate-900 flex items-center gap-2">
@@ -732,8 +772,6 @@ export default function TablesPage() {
                 <X size={14} className="text-slate-500" />
               </button>
             </div>
-
-            {/* Body */}
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
               {sessions.length < 2 ? (
                 <div className="text-center py-10 text-slate-400">
@@ -743,55 +781,33 @@ export default function TablesPage() {
                 </div>
               ) : (
                 <>
-                  {/* Source */}
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                      From (Source Table)
-                      <span className="normal-case text-slate-400 font-normal ml-1 tracking-normal">— will be freed</span>
-                    </label>
+                    <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">From (Source)</label>
                     <Select value={mergeSourceId} onValueChange={(v) => v !== null && setMergeSourceId(v)}>
-                      <SelectTrigger className="rounded-xl border-slate-200 bg-slate-50 text-sm w-full h-11">
-                        <SelectValue placeholder="Select source table..." />
-                      </SelectTrigger>
+                      <SelectTrigger className="rounded-xl border-slate-200 bg-slate-50 text-sm w-full h-11"><SelectValue placeholder="Select source table..." /></SelectTrigger>
                       <SelectContent>
                         {sessions.filter((s) => s.id !== mergeTargetId).map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
-                            Table {s.tableNumber} — ₹{(s.totalAmount || 0).toFixed(0)}
-                          </SelectItem>
+                          <SelectItem key={s.id} value={s.id}>Table {s.tableNumber} — ₹{(s.totalAmount || 0).toFixed(0)}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-
-                  {/* Arrow */}
                   <div className="flex items-center justify-center">
                     <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 rounded-full px-4 py-2 text-purple-600 text-xs font-bold">
-                      <ArrowRight className="w-4 h-4" />
-                      merge into
+                      <ArrowRight className="w-4 h-4" /> merge into
                     </div>
                   </div>
-
-                  {/* Target */}
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                      To (Target Table)
-                      <span className="normal-case text-slate-400 font-normal ml-1 tracking-normal">— gets combined bill</span>
-                    </label>
+                    <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">To (Target)</label>
                     <Select value={mergeTargetId} onValueChange={(v) => v !== null && setMergeTargetId(v)}>
-                      <SelectTrigger className="rounded-xl border-slate-200 bg-slate-50 text-sm w-full h-11">
-                        <SelectValue placeholder="Select target table..." />
-                      </SelectTrigger>
+                      <SelectTrigger className="rounded-xl border-slate-200 bg-slate-50 text-sm w-full h-11"><SelectValue placeholder="Select target table..." /></SelectTrigger>
                       <SelectContent>
                         {sessions.filter((s) => s.id !== mergeSourceId).map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
-                            Table {s.tableNumber} — ₹{(s.totalAmount || 0).toFixed(0)}
-                          </SelectItem>
+                          <SelectItem key={s.id} value={s.id}>Table {s.tableNumber} — ₹{(s.totalAmount || 0).toFixed(0)}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-
-                  {/* Preview */}
                   {mergeSourceId && mergeTargetId && (() => {
                     const src = sessions.find((s) => s.id === mergeSourceId);
                     const tgt = sessions.find((s) => s.id === mergeTargetId);
@@ -799,56 +815,28 @@ export default function TablesPage() {
                     const combined = (src.totalAmount || 0) + (tgt.totalAmount || 0);
                     return (
                       <div className="rounded-2xl overflow-hidden border border-purple-200 bg-purple-50">
-                        <div className="px-4 pt-3 pb-1">
-                          <p className="text-[10px] font-black text-purple-500 uppercase tracking-widest">Combined Bill Preview</p>
-                        </div>
+                        <div className="px-4 pt-3 pb-1"><p className="text-[10px] font-black text-purple-500 uppercase tracking-widest">Combined Bill Preview</p></div>
                         <div className="px-4 pb-4 space-y-2">
-                          <div className="flex justify-between text-sm text-slate-700">
-                            <span className="font-medium">Table {src.tableNumber}</span>
-                            <span className="font-bold">₹{(src.totalAmount || 0).toFixed(2)}</span>
-                          </div>
-                          <div className="flex justify-between text-sm text-slate-700">
-                            <span className="font-medium">Table {tgt.tableNumber}</span>
-                            <span className="font-bold">₹{(tgt.totalAmount || 0).toFixed(2)}</span>
-                          </div>
+                          <div className="flex justify-between text-sm text-slate-700"><span className="font-medium">Table {src.tableNumber}</span><span className="font-bold">₹{(src.totalAmount || 0).toFixed(2)}</span></div>
+                          <div className="flex justify-between text-sm text-slate-700"><span className="font-medium">Table {tgt.tableNumber}</span><span className="font-bold">₹{(tgt.totalAmount || 0).toFixed(2)}</span></div>
                           <div className="h-px bg-purple-200" />
-                          <div className="flex justify-between items-center">
-                            <span className="font-black text-slate-900 text-sm">Combined Total</span>
-                            <span className="text-purple-700 text-2xl font-black">₹{combined.toFixed(2)}</span>
-                          </div>
+                          <div className="flex justify-between items-center"><span className="font-black text-slate-900 text-sm">Combined Total</span><span className="text-purple-700 text-2xl font-black">₹{combined.toFixed(2)}</span></div>
                         </div>
-                        <div className="bg-purple-100 px-4 py-2.5 text-[11px] text-purple-700 font-semibold">
-                          ⚠ Table {src.tableNumber} will be cleared after merge
-                        </div>
+                        <div className="bg-purple-100 px-4 py-2.5 text-[11px] text-purple-700 font-semibold">⚠ Table {src.tableNumber} will be cleared after merge</div>
                       </div>
                     );
                   })()}
                 </>
               )}
             </div>
-
-            {/* Footer */}
             {sessions.length >= 2 && (
               <div className="px-6 pb-6 pt-4 border-t border-slate-100 flex-shrink-0 bg-white flex gap-3">
-                <button
-                  onClick={() => { setMergeModalOpen(false); setMergeSourceId(""); setMergeTargetId(""); }}
-                  className="flex-1 h-11 rounded-xl font-bold border-2 border-slate-200 bg-white text-slate-700 text-sm hover:bg-slate-50 transition-all flex items-center justify-center"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleMergeSessions}
-                  disabled={merging || !mergeSourceId || !mergeTargetId}
-                  className="flex-1 h-11 rounded-xl font-bold bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white shadow-lg shadow-purple-500/25 text-sm active:scale-[0.98] transition-all flex items-center justify-center"
-                  style={{ background: "linear-gradient(135deg, #9333ea, #7c3aed)", color: "#ffffff" }}
-                >
-                  {merging
-                    ? <><RefreshCcw className="w-4 h-4 mr-2 animate-spin" /> Merging...</>
-                    : <><Merge className="w-4 h-4 mr-2" /> Confirm Merge</>}
+                <button onClick={() => { setMergeModalOpen(false); setMergeSourceId(""); setMergeTargetId(""); }} className="flex-1 h-11 rounded-xl font-bold border-2 border-slate-200 bg-white text-slate-700 text-sm hover:bg-slate-50 transition-all flex items-center justify-center">Cancel</button>
+                <button onClick={handleMergeSessions} disabled={merging || !mergeSourceId || !mergeTargetId} className="flex-1 h-11 rounded-xl font-bold bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white shadow-lg shadow-purple-500/25 text-sm active:scale-[0.98] transition-all flex items-center justify-center" style={{ background: "linear-gradient(135deg, #9333ea, #7c3aed)", color: "#ffffff" }}>
+                  {merging ? <><RefreshCcw className="w-4 h-4 mr-2 animate-spin" /> Merging...</> : <><Merge className="w-4 h-4 mr-2" /> Confirm Merge</>}
                 </button>
               </div>
             )}
-
           </div>
         </DialogContent>
       </Dialog>
@@ -857,60 +845,16 @@ export default function TablesPage() {
       <Dialog open={!!qrModal} onOpenChange={(open) => !open && setQrModal(null)}>
         <DialogContent showCloseButton={false} className="w-[95vw] max-w-sm p-0 overflow-hidden gap-0 border-0 bg-transparent shadow-none">
           {qrModal && (
-            <div
-              className="relative flex flex-col text-white rounded-2xl overflow-hidden"
-              style={{ background: "linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%)" }}
-            >
-              {/* Decorative blobs */}
+            <div className="relative flex flex-col text-white rounded-2xl overflow-hidden" style={{ background: "linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%)" }}>
               <div className="absolute -top-10 -left-10 w-36 h-36 rounded-full bg-emerald-500/10 blur-2xl pointer-events-none" />
               <div className="absolute -bottom-10 -right-10 w-44 h-44 rounded-full bg-emerald-400/8 blur-2xl pointer-events-none" />
-
-              {/* Header */}
-              <div className="relative z-10 flex items-center justify-between px-6 pt-5 pb-0">
-                <div className="w-8 h-1 rounded-full bg-emerald-400" />
-                <button
-                  onClick={() => setQrModal(null)}
-                  className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-
-              {/* Body */}
+              <div className="relative z-10 flex items-center justify-between px-6 pt-5 pb-0"><div className="w-8 h-1 rounded-full bg-emerald-400" /><button onClick={() => setQrModal(null)} className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"><X size={14} /></button></div>
               <div className="relative z-10 flex flex-col items-center px-6 pt-5 pb-5 gap-5">
-                {/* Cafe name + table */}
-                <div className="text-center">
-                  <h2 className="font-black text-2xl tracking-wide uppercase">{cafeName}</h2>
-                  <p className="text-emerald-400 text-[11px] font-bold tracking-widest mt-1">TABLE {qrModal.table}</p>
-                </div>
-
-                {/* QR Code */}
-                <div className="bg-white rounded-2xl p-4 shadow-2xl shadow-black/50">
-                  <img
-                    src={qrModal.dataUrl}
-                    alt={`QR Code Table ${qrModal.table}`}
-                    className="w-52 h-52 object-contain"
-                  />
-                </div>
-
-                {/* Scan label */}
-                <div className="text-center">
-                  <p className="text-lg font-black flex items-center justify-center gap-2">
-                    <Smartphone className="w-5 h-5 text-emerald-400" /> Scan &amp; Order
-                  </p>
-                  <p className="text-white/50 text-xs mt-1">No app needed • Instant digital menu</p>
-                </div>
-
-                {/* Divider */}
+                <div className="text-center"><h2 className="font-black text-2xl tracking-wide uppercase">{cafeName}</h2><p className="text-emerald-400 text-[11px] font-bold tracking-widest mt-1">TABLE {qrModal.table}</p></div>
+                <div className="bg-white rounded-2xl p-4 shadow-2xl shadow-black/50"><img src={qrModal.dataUrl} alt={`QR Code`} className="w-52 h-52 object-contain" /></div>
+                <div className="text-center"><p className="text-lg font-black flex items-center justify-center gap-2"><Smartphone className="w-5 h-5 text-emerald-400" /> Scan &amp; Order</p><p className="text-white/50 text-xs mt-1">No app needed • Instant digital menu</p></div>
                 <div className="w-full h-px bg-white/10" />
-
-                {/* Download */}
-                <button
-                  onClick={() => handleDownloadQR(qrModal)}
-                  className="w-full h-11 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-500/30 gap-2 text-sm active:scale-[0.98] transition-all flex items-center justify-center"
-                >
-                  <Download size={16} /> Download QR Card
-                </button>
+                <button onClick={() => handleDownloadQR(qrModal)} className="w-full h-11 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-500/30 gap-2 text-sm active:scale-[0.98] transition-all flex items-center justify-center"><Download size={16} /> Download QR Card</button>
                 <p className="text-white/25 text-[10px] font-medium -mt-3">Powered by CafeQR</p>
               </div>
             </div>
@@ -918,188 +862,184 @@ export default function TablesPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Checkout / Bill Modal ── */}
-      <Dialog open={!!selectedSession} onOpenChange={(open) => !open && setSelectedSession(null)}>
+      {/* ── Unified Table Bill Modal ── */}
+      <Dialog open={!!selectedTable} onOpenChange={(open) => !open && !isSettlingAll && setSelectedTable(null)}>
         <DialogContent showCloseButton={false} className="w-[95vw] max-w-xl p-0 overflow-hidden gap-0 rounded-2xl">
-          {selectedSession && (() => {
-            const sessionOrders = orders.filter((o: any) => o.sessionId === selectedSession.id);
-            const seatedMins = Math.floor((new Date().getTime() - selectedSession.createdAt.getTime()) / 60000);
-            const pendingItems = sessionOrders.filter((o: any) => ["pending", "accepted", "preparing"].includes(o.status));
-            const totalItemsOrdered = sessionOrders.reduce((s: number, o: any) => s + o.items.reduce((n: number, it: any) => n + it.quantity, 0), 0);
-            
-            // Calculate real-time total dynamically from visible orders to ensure 100% accuracy
-            const realTimeTotal = sessionOrders.reduce((sum: number, order: any) => {
-              if (order.status === "cancelled") return sum;
-              return sum + order.items.reduce((itemSum: number, item: any) => itemSum + (item.price * item.quantity), 0);
-            }, 0);
+          {selectedTable && (() => {
+            const tableSessions = sessions.filter(s => 
+              s.tableNumber === selectedTable && s.status === "active"
+            ).sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime());
+
+            const orphanOrders = orders.filter((o: any) =>
+              o.tableNumber === selectedTable &&
+              o.status !== "cancelled" &&
+              !o.sessionId
+            );
+
+            const tableTotal = tableSessions.reduce((sum, s) => sum + getSessionTotal(s.id), 0) + 
+              orphanOrders.reduce((sum: number, o: any) => sum + o.items.reduce((s: number, i: any) => s + i.price * i.quantity, 0), 0);
 
             return (
               <div className="flex flex-col max-h-[85vh]">
-
+                
                 {/* Header */}
-                <div className="px-4 sm:px-6 py-4 sm:py-5 border-b border-slate-100 flex-shrink-0 flex flex-col gap-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <Badge className="bg-emerald-100 text-emerald-700 border-none px-2 py-0.5 text-[10px] font-bold">● Active</Badge>
-                      </div>
-                      <DialogTitle className="text-lg sm:text-xl font-black text-slate-900 leading-tight truncate">
-                        Table {selectedSession.tableNumber} — Bill
-                      </DialogTitle>
-                      <DialogDescription className="text-xs text-slate-400 font-medium mt-0.5">
-                        Since {selectedSession.createdAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </DialogDescription>
+                <div className="px-4 sm:px-6 py-4 border-b border-slate-100 flex-shrink-0 flex items-center justify-between bg-white">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Badge className="bg-emerald-100 text-emerald-700 border-none px-2 py-0.5 text-[10px] font-bold">● Active</Badge>
+                      <span className="text-xs text-slate-500 font-bold">{tableSessions.length} People Active</span>
                     </div>
+                    <DialogTitle className="text-lg sm:text-xl font-black text-slate-900 leading-tight">
+                      TABLE {selectedTable}
+                    </DialogTitle>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Button 
+                      variant="outline"
+                      onClick={() => setPersonPickerOpen(true)}
+                      className="rounded-xl border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 font-bold text-xs h-9 px-3"
+                    >
+                      <Plus className="w-3.5 h-3.5 mr-1" /> Add to Bill
+                    </Button>
                     <button
-                      onClick={() => setSelectedSession(null)}
-                      className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors flex-shrink-0"
+                      onClick={() => setSelectedTable(null)}
+                      disabled={isSettlingAll}
+                      className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors flex-shrink-0 disabled:opacity-50"
                     >
                       <X size={14} className="text-slate-500" />
                     </button>
                   </div>
-                  
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    {/* Stat pills */}
-                    <div className="flex gap-1.5 flex-wrap">
-                      <span className="inline-flex items-center gap-1 bg-slate-100 rounded-lg px-2 py-1 text-[10px] sm:text-xs font-bold text-slate-600">
-                        <Clock size={9} />
-                        {seatedMins < 60 ? `${seatedMins}m` : `${Math.floor(seatedMins / 60)}h ${seatedMins % 60}m`}
-                      </span>
-                      <span className="inline-flex items-center gap-1 bg-slate-100 rounded-lg px-2 py-1 text-[10px] sm:text-xs font-bold text-slate-600">
-                        <ShoppingBag size={9} /> {totalItemsOrdered}
-                      </span>
-                      <span className="inline-flex items-center gap-1 bg-slate-100 rounded-lg px-2 py-1 text-[10px] sm:text-xs font-bold text-slate-600">
-                        <Receipt size={9} /> {sessionOrders.length}
-                      </span>
-                      {pendingItems.length > 0 && (
-                        <span className="inline-flex items-center gap-1 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 text-[10px] sm:text-xs font-bold text-amber-700">
-                          <ChefHat size={9} /> {pendingItems.length} cooking
-                        </span>
-                      )}
-                    </div>
-                    
-                    <button
-                      onClick={() => {
-                        setItemsToAdd([]);
-                        setAddItemModalOpen(true);
-                      }}
-                      className="w-full sm:w-auto h-9 rounded-xl text-[11px] sm:text-xs font-bold px-4 active:scale-95 transition-all flex items-center justify-center gap-1.5"
-                      style={{ background: "linear-gradient(135deg, #9333ea, #7c3aed)", color: "#ffffff", boxShadow: "0 4px 14px rgba(147,51,234,0.35)" }}
-                    >
-                      <Plus className="w-3 h-3 sm:w-3.5 sm:h-3.5 flex-shrink-0" />
-                      <span>Add to Bill</span>
-                    </button>
-                  </div>
                 </div>
 
-                {/* Bill Body */}
-                <div className="flex-1 overflow-y-auto px-2 sm:px-6 py-3 sm:py-5 bg-slate-50/60 space-y-3 sm:space-y-4">
-
-                  {/* Receipt card */}
-                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                    {/* Receipt header */}
-                    <div className="flex items-center justify-between py-3 px-3 sm:py-4 sm:px-5 border-b border-slate-100 bg-slate-50">
-                      <div className="font-black text-slate-800 tracking-tight text-sm sm:text-base">TABLE {selectedSession.tableNumber}</div>
-                      <div className="text-[10px] sm:text-xs text-slate-500 font-medium text-right">
-                        {selectedSession.createdAt.toLocaleDateString()} · {selectedSession.createdAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </div>
+                {/* Body */}
+                <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 bg-slate-50/80">
+                  {tableSessions.length === 0 && orphanOrders.length === 0 && (
+                    <div className="text-center py-10 text-slate-400">
+                      <Receipt className="w-12 h-12 mx-auto mb-3 opacity-20" />
+                      <p className="font-semibold text-sm">Table is empty</p>
                     </div>
+                  )}
 
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left text-sm text-slate-600 min-w-[320px]">
-                        <thead className="bg-slate-50 border-b border-slate-100 text-[10px] sm:text-xs text-slate-400 font-bold uppercase tracking-wider">
-                          <tr>
-                            <th className="px-3 sm:px-5 py-2.5 sm:py-3 font-semibold">Item</th>
-                            <th className="px-2 sm:px-5 py-2.5 sm:py-3 font-semibold text-center w-12 sm:w-16">Qty</th>
-                            <th className="px-2 sm:px-5 py-2.5 sm:py-3 font-semibold text-center w-16 sm:w-20">Rate</th>
-                            <th className="px-2 sm:px-5 py-2.5 sm:py-3 font-semibold text-right w-16 sm:w-24">Amt</th>
-                            <th className="px-2 sm:px-3 py-2.5 sm:py-3 w-8 sm:w-10"></th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {sessionOrders.length === 0 ? (
-                            <tr>
-                              <td colSpan={5} className="px-3 py-8 text-center text-sm text-slate-400 font-medium">No orders yet</td>
-                            </tr>
-                          ) : (
-                            sessionOrders.map((order: any) => {
-                              const isPending = ["pending", "accepted", "preparing"].includes(order.status);
-                              const isCancelled = order.status === "cancelled";
-                              if (isCancelled) return null;
-                              return order.items.map((item: any, idx: number) => (
-                                <tr key={`${order.id}-${idx}`} className="hover:bg-slate-50/80 transition-colors group">
-                                  <td className="px-3 sm:px-5 py-2.5 sm:py-3.5 font-semibold text-slate-700 text-xs sm:text-sm">
-                                    {item.name}
-                                    {isPending && (
-                                      <span className="block text-[10px] text-amber-500 font-semibold italic mt-0.5">⏳ Preparing…</span>
-                                    )}
-                                  </td>
-                                  <td className="px-2 sm:px-5 py-2.5 sm:py-3.5 font-bold text-slate-500 text-center text-xs sm:text-sm">×{item.quantity}</td>
-                                  <td className="px-2 sm:px-5 py-2.5 sm:py-3.5 text-slate-400 text-[10px] sm:text-xs text-center">₹{item.price}</td>
-                                  <td className="px-2 sm:px-5 py-2.5 sm:py-3.5 font-bold text-slate-800 text-right text-xs sm:text-sm">₹{(item.price * item.quantity).toFixed(0)}</td>
-                                  <td className="px-1.5 sm:px-3 py-2.5 sm:py-3.5 text-center">
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); handleRemoveItem(order.id, order.items, idx); }}
-                                      className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-lg bg-red-50 text-red-500 hover:bg-red-500 hover:text-white transition-all shadow-sm"
-                                      title="Remove item from bill"
-                                    >
+                  {tableSessions.map((session, index) => {
+                    const personLabel = `Person ${index + 1}`;
+                    const sessOrders = getSessionOrders(session.id);
+                    const total = getSessionTotal(session.id);
+                    const isSettling = settlingIds.has(session.id);
+                    
+                    return (
+                      <div key={session.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm mb-4">
+                        <div className="flex items-center justify-between py-3 px-4 border-b border-slate-100 bg-slate-50">
+                          <div className="font-black text-slate-800 flex items-center gap-2">
+                            <Users size={14} className="text-slate-400" /> {personLabel}
+                          </div>
+                          <div className="font-black text-slate-900">₹{total.toFixed(2)}</div>
+                        </div>
+                        
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-sm text-slate-600 min-w-[320px]">
+                            <tbody className="divide-y divide-slate-100">
+                              {sessOrders.length === 0 ? (
+                                <tr><td colSpan={5} className="px-4 py-4 text-center text-xs text-slate-400 font-medium">No items</td></tr>
+                              ) : (
+                                sessOrders.map((order: any) => order.items.map((item: any, idx: number) => {
+                                  const isPending = ["pending", "accepted", "preparing"].includes(order.status);
+                                  return (
+                                    <tr key={`${order.id}-${idx}`} className="group hover:bg-slate-50/50">
+                                      <td className="px-4 py-2 font-semibold text-slate-700 text-xs sm:text-sm">
+                                        {item.name}
+                                        {isPending && <span className="block text-[10px] text-amber-500 font-semibold italic mt-0.5">⏳ Preparing…</span>}
+                                      </td>
+                                      <td className="px-2 py-2 font-bold text-slate-500 text-center text-xs sm:text-sm">×{item.quantity}</td>
+                                      <td className="px-2 py-2 text-slate-400 text-[10px] sm:text-xs text-center">₹{item.price}</td>
+                                      <td className="px-2 py-2 font-bold text-slate-800 text-right text-xs sm:text-sm">₹{(item.price * item.quantity).toFixed(0)}</td>
+                                      <td className="px-2 py-2 text-center w-10">
+                                        <button onClick={(e) => { e.stopPropagation(); handleRemoveItem(order.id, order.items, idx); }} className="w-6 h-6 flex items-center justify-center rounded-md bg-red-50 text-red-400 hover:bg-red-500 hover:text-white transition-all shadow-sm opacity-0 group-hover:opacity-100">
+                                          <Trash2 size={12} />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  )
+                                }))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                        
+                        <div className="p-3 border-t border-slate-100 bg-slate-50">
+                          <Button 
+                            disabled={isSettlingAll || isSettling} 
+                            onClick={() => handleCheckoutSingle(session.id, personLabel)}
+                            className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold h-10 shadow-md"
+                          >
+                            {isSettling ? <RefreshCcw className="w-4 h-4 mr-2 animate-spin" /> : <Receipt className="w-4 h-4 mr-2" />}
+                            {isSettling ? `Settling ${personLabel}...` : `Settle ${personLabel} — ₹${total.toFixed(2)}`}
+                          </Button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                  
+                  {orphanOrders.length > 0 && (
+                    <div className="bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm mb-4">
+                      <div className="flex items-center justify-between py-3 px-4 border-b border-red-200 bg-red-100">
+                        <div className="font-black text-red-800 flex items-center gap-2 text-sm">
+                          <AlertTriangle size={14} /> Unassigned Orders
+                        </div>
+                        <div className="font-black text-red-900">
+                          ₹{orphanOrders.reduce((sum: number, o: any) => sum + o.items.reduce((s: number, i: any) => s + i.price * i.quantity, 0), 0).toFixed(2)}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-red-50/50 text-[11px] text-red-700 font-medium border-b border-red-200/50">
+                        These orders belong to sessions that are no longer active, but weren't cancelled.
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm text-red-700 min-w-[320px]">
+                          <tbody className="divide-y divide-red-200/50">
+                            {orphanOrders.map((order: any) => order.items.map((item: any, idx: number) => (
+                               <tr key={`${order.id}-${idx}`} className="group hover:bg-red-100/50">
+                                  <td className="px-4 py-2 font-semibold text-xs sm:text-sm">{item.name}</td>
+                                  <td className="px-2 py-2 font-bold opacity-70 text-center text-xs sm:text-sm">×{item.quantity}</td>
+                                  <td className="px-2 py-2 opacity-60 text-[10px] sm:text-xs text-center">₹{item.price}</td>
+                                  <td className="px-2 py-2 font-bold text-right text-xs sm:text-sm">₹{(item.price * item.quantity).toFixed(0)}</td>
+                                  <td className="px-2 py-2 text-center w-10">
+                                    <button onClick={(e) => { e.stopPropagation(); handleRemoveItem(order.id, order.items, idx); }} className="w-6 h-6 flex items-center justify-center rounded-md bg-red-200 text-red-700 hover:bg-red-600 hover:text-white transition-all shadow-sm opacity-0 group-hover:opacity-100">
                                       <Trash2 size={12} />
                                     </button>
                                   </td>
-                                </tr>
-                              ));
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* Totals footer */}
-                    <div className="border-t border-slate-200 px-3 sm:px-5 py-3 sm:py-4 bg-slate-50 flex flex-col gap-1.5">
-                      <div className="flex justify-between text-xs sm:text-sm text-slate-500">
-                        <span>Subtotal</span>
-                        <span className="font-bold text-slate-700">₹{realTimeTotal.toFixed(2)}</span>
+                               </tr>
+                            )))}
+                          </tbody>
+                        </table>
                       </div>
-                      <div className="flex justify-between items-center pt-2 border-t border-slate-200/60 mt-1">
-                        <span className="text-sm sm:text-base font-black text-slate-900 uppercase tracking-wide">Total Bill</span>
-                        <span className="text-xl sm:text-2xl font-black text-emerald-600">₹{realTimeTotal.toFixed(2)}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Pending warning */}
-                  {pendingItems.length > 0 && (
-                    <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-                      <AlertTriangle size={14} className="text-amber-500 flex-shrink-0 mt-0.5" />
-                      <p className="text-xs text-amber-700 font-semibold leading-snug">
-                        {pendingItems.length} order{pendingItems.length > 1 ? 's' : ''} still being prepared.
-                        Settling now will lock the current bill amount.
-                      </p>
                     </div>
                   )}
                 </div>
 
                 {/* Footer */}
-                <div className="px-3 sm:px-6 py-3 sm:py-5 border-t border-slate-100 flex-shrink-0 bg-white">
-                  <div className="flex gap-3 mb-3">
+                <div className="px-4 sm:px-6 py-4 border-t border-slate-100 bg-white">
+                  <div className="flex justify-between items-center mb-4 px-2">
+                    <span className="font-black text-lg text-slate-800">TABLE TOTAL</span>
+                    <span className="font-black text-2xl text-emerald-600">₹{tableTotal.toFixed(2)}</span>
+                  </div>
+                  <div className="flex gap-3">
                     <Button
                       variant="outline"
-                      onClick={() => handlePrintBill(selectedSession)}
+                      onClick={() => handlePrintBill(selectedTable)}
                       className="flex-1 h-12 rounded-xl text-sm font-bold gap-2 border-slate-200 hover:bg-slate-50 bg-white"
                     >
-                      <Printer size={16} /> Print Bill
+                      <Printer size={16} /> Print Full Bill
                     </Button>
+                    <button
+                      onClick={() => handleCheckoutAll(tableSessions)}
+                      disabled={isSettlingAll || settlingIds.size > 0 || tableSessions.length === 0}
+                      className="flex-1 h-12 rounded-xl text-sm font-black text-white shadow-lg active:scale-[0.98] transition-all gap-2 flex items-center justify-center disabled:opacity-50"
+                      style={{ background: "linear-gradient(135deg, #059669, #047857)", color: "#ffffff", boxShadow: "0 4px 20px rgba(5,150,105,0.35)" }}
+                    >
+                      {isSettlingAll
+                        ? <><RefreshCcw className="animate-spin w-4 h-4 flex-shrink-0" /><span className="ml-2">Settling All...</span></>
+                        : <><Receipt className="w-4 h-4 flex-shrink-0" /><span className="ml-2">Settle All — ₹{tableTotal.toFixed(2)}</span></>}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => handleCheckout(selectedSession.id)}
-                    disabled={checkoutLoading}
-                    className="w-full h-12 rounded-xl text-sm font-black text-white shadow-lg active:scale-[0.98] transition-all gap-2 flex items-center justify-center disabled:opacity-50"
-                    style={{ background: "linear-gradient(135deg, #059669, #047857)", color: "#ffffff", boxShadow: "0 4px 20px rgba(5,150,105,0.35)" }}
-                  >
-                    {checkoutLoading
-                      ? <><RefreshCcw className="animate-spin w-4 h-4 flex-shrink-0" /><span className="ml-2">Processing...</span></>
-                      : <><Receipt className="w-4 h-4 flex-shrink-0" /><span className="ml-2">Settle ₹{realTimeTotal.toFixed(2)} &amp; Clear Table</span></>}
-                  </button>
                 </div>
 
               </div>
@@ -1108,12 +1048,55 @@ export default function TablesPage() {
         </DialogContent>
       </Dialog>
 
+      {/* ── Person Picker for Add to Bill ── */}
+      <Dialog open={personPickerOpen} onOpenChange={setPersonPickerOpen}>
+        <DialogContent showCloseButton={false} className="w-[95vw] max-w-xs p-0 overflow-hidden gap-0 rounded-2xl shadow-xl">
+          <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between">
+            <DialogTitle className="text-lg font-black text-slate-900">Add Items to Bill</DialogTitle>
+            <button onClick={() => setPersonPickerOpen(false)} className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors">
+              <X size={14} className="text-slate-500" />
+            </button>
+          </div>
+          <div className="p-5">
+            <label className="text-xs font-bold text-slate-600 mb-3 block uppercase tracking-wider">Select Person to Bill</label>
+            <div className="flex flex-col gap-2">
+              {sessions.filter(s => s.tableNumber === selectedTable && s.status === 'active').sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime()).map((s, idx) => (
+                <button
+                  key={s.id}
+                  onClick={() => {
+                    const stillActive = sessions.find(activeS => activeS.id === s.id && activeS.status === 'active');
+                    if (!stillActive) {
+                      toast.error("This person already checked out. Please refresh.");
+                      return;
+                    }
+                    setSelectedSessionIdForAdd(s.id);
+                    setPersonPickerOpen(false);
+                    setItemsToAdd([]);
+                    setAddItemModalOpen(true);
+                  }}
+                  className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 bg-white hover:bg-purple-50 hover:border-purple-200 transition-all text-left group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-slate-100 group-hover:bg-purple-100 flex items-center justify-center text-slate-500 group-hover:text-purple-600 font-bold text-sm">
+                      P{idx + 1}
+                    </div>
+                    <div>
+                      <div className="font-bold text-sm text-slate-900 group-hover:text-purple-900">Person {idx + 1}</div>
+                      <div className="text-xs text-slate-500 font-medium">Current Bill: ₹{getSessionTotal(s.id).toFixed(0)}</div>
+                    </div>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-slate-300 group-hover:text-purple-500" />
+                </button>
+              ))}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* ── Add to Bill Modal ── */}
       <Dialog open={addItemModalOpen} onOpenChange={(open) => { if (!open) { setAddItemModalOpen(false); setItemsToAdd([]); } }}>
         <DialogContent showCloseButton={false} className="w-[95vw] max-w-xl p-0 overflow-hidden gap-0 rounded-2xl shadow-2xl max-h-[85vh]">
           <div className="flex flex-col h-full max-h-[85vh] bg-white">
-
-            {/* Header */}
             <div className="flex items-center justify-between px-4 pt-4 pb-3 border-b border-slate-100 flex-shrink-0">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-purple-600 flex items-center justify-center shadow-sm flex-shrink-0">
@@ -1124,7 +1107,7 @@ export default function TablesPage() {
                     Add Items to Bill
                   </DialogTitle>
                   <DialogDescription className="text-xs text-slate-500 font-semibold mt-0.5">
-                    Table {selectedSession?.tableNumber} · tap + to add items
+                    Table {selectedTable} · tap + to add items
                   </DialogDescription>
                 </div>
               </div>
@@ -1136,8 +1119,6 @@ export default function TablesPage() {
               </button>
             </div>
 
-
-            {/* Menu items list */}
             <div className="flex-1 overflow-y-auto bg-slate-50 px-4 sm:px-5 py-3 sm:py-4 space-y-2.5 sm:space-y-3">
               {menuItems.filter(i => i.available).length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -1156,7 +1137,6 @@ export default function TablesPage() {
                         qty > 0 ? "border-purple-300 shadow-sm shadow-purple-100" : "border-slate-200 hover:border-slate-300"
                       }`}
                     >
-                      {/* Item name + price */}
                       <div className="flex-1 min-w-0">
                         <p className="font-bold text-sm text-slate-900 leading-snug">{menuItem.name}</p>
                         <div className="flex items-center gap-2 mt-0.5">
@@ -1169,9 +1149,7 @@ export default function TablesPage() {
                         </div>
                       </div>
 
-                      {/* Qty controls */}
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        {/* − button */}
                         <button
                           disabled={qty === 0}
                           onClick={() => setItemsToAdd(prev => {
@@ -1180,22 +1158,16 @@ export default function TablesPage() {
                             return prev.filter(i => i.item.id !== menuItem.id);
                           })}
                           className={`w-7 h-7 rounded-full border-2 flex items-center justify-center text-base font-black transition-all select-none ${
-                            qty === 0
-                              ? "border-slate-200 text-slate-300 cursor-not-allowed"
-                              : "border-red-200 text-red-500 hover:bg-red-500 hover:text-white hover:border-red-500 active:scale-90"
+                            qty === 0 ? "border-slate-200 text-slate-300 cursor-not-allowed" : "border-red-200 text-red-500 hover:bg-red-500 hover:text-white hover:border-red-500 active:scale-90"
                           }`}
                         >
                           −
                         </button>
-
-                        {/* Count badge */}
                         <div className={`w-7 h-7 rounded-lg border-2 flex items-center justify-center text-xs font-black transition-all ${
                           qty > 0 ? "bg-purple-600 border-purple-600 text-white" : "bg-slate-100 border-slate-200 text-slate-400"
                         }`}>
                           {qty}
                         </div>
-
-                        {/* + button */}
                         <button
                           onClick={() => setItemsToAdd(prev => {
                             const ex = prev.find(i => i.item.id === menuItem.id);
@@ -1213,8 +1185,6 @@ export default function TablesPage() {
               )}
             </div>
 
-
-            {/* ── Footer Actions ── */}
             <div className="px-3 sm:px-4 pb-3 sm:pb-4 pt-3 border-t border-slate-100 flex-shrink-0 bg-white">
               <div className="flex gap-2">
                 <button
@@ -1234,17 +1204,11 @@ export default function TablesPage() {
                   }
                 >
                   {addingItems ? (
-                    <>
-                      <RefreshCcw className="w-4 h-4 flex-shrink-0 animate-spin" />
-                      <span>Adding...</span>
-                    </>
+                    <><RefreshCcw className="w-4 h-4 flex-shrink-0 animate-spin" /><span>Adding...</span></>
                   ) : itemsToAdd.length === 0 ? (
                     <span style={{ color: "#94a3b8", fontWeight: 700, fontSize: "0.875rem" }}>Select Items First</span>
                   ) : (
-                    <>
-                      <Receipt className="w-4 h-4 flex-shrink-0" />
-                      <span>Add {itemsToAdd.reduce((s, i) => s + i.quantity, 0)} Item{itemsToAdd.reduce((s, i) => s + i.quantity, 0) !== 1 ? "s" : ""} &nbsp;·&nbsp; ₹{itemsToAdd.reduce((s, i) => s + i.item.price * i.quantity, 0).toFixed(0)}</span>
-                    </>
+                    <><Receipt className="w-4 h-4 flex-shrink-0" /><span>Add {itemsToAdd.reduce((s, i) => s + i.quantity, 0)} Item{itemsToAdd.reduce((s, i) => s + i.quantity, 0) !== 1 ? "s" : ""} &nbsp;·&nbsp; ₹{itemsToAdd.reduce((s, i) => s + i.item.price * i.quantity, 0).toFixed(0)}</span></>
                   )}
                 </button>
               </div>

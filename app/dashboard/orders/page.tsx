@@ -92,13 +92,16 @@ const STATUS_CONFIG = {
 type Status = keyof typeof STATUS_CONFIG;
 
 function TimeAgo({ date }: { date: Date }) {
-  const [timeText, setTimeText] = useState("");
+  const [timeText, setTimeText] = useState(() => formatDistanceToNow(date, { addSuffix: true }));
 
   useEffect(() => {
-    setTimeText(formatDistanceToNow(date, { addSuffix: true }));
     const interval = setInterval(() => {
       setTimeText(formatDistanceToNow(date, { addSuffix: true }));
     }, 30000);
+
+    // keep state in sync when date changes
+    setTimeText(formatDistanceToNow(date, { addSuffix: true }));
+
     return () => clearInterval(interval);
   }, [date]);
 
@@ -109,6 +112,7 @@ function TimeAgo({ date }: { date: Date }) {
     </span>
   );
 }
+
 
 export default function OrdersPage() {
   const { user } = useAuth();
@@ -129,7 +133,30 @@ export default function OrdersPage() {
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
   const [cancellingOrder, setCancellingOrder] = useState(false);
   const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
-  const { calls } = useWaiterCalls(user?.uid || null);
+  // cafeId for realtime calls must match Firestore path: cafes/{cafeId}/waiter_calls
+  // Current auth UID is NOT necessarily the cafeId.
+  const [cafeId, setCafeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCafeId = async () => {
+      try {
+        const res = await api.get("/cafe/profile");
+        const id = res?.data?.id;
+        if (!cancelled) setCafeId(id || null);
+      } catch {
+        if (!cancelled) setCafeId(null);
+      }
+    };
+    if (user?.uid) loadCafeId();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
+
+  const { calls } = useWaiterCalls(cafeId);
+
+
 
   // Close picker on outside click
   useEffect(() => {
@@ -179,7 +206,15 @@ export default function OrdersPage() {
   };
   
   // Sound controls
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return localStorage.getItem("cafe_qr_muted") === "true";
+    } catch {
+      return false;
+    }
+  });
+
   
   // Collapsed columns control
   const [collapsedCols, setCollapsedCols] = useState<Record<Status, boolean>>({
@@ -193,9 +228,11 @@ export default function OrdersPage() {
   useEffect(() => {
     if (typeof window !== "undefined") {
       const isMuted = localStorage.getItem("cafe_qr_muted") === "true";
-      setMuted(isMuted);
+      // avoid direct setState in effect body (eslint react-hooks/set-state-in-effect)
+      queueMicrotask(() => setMuted(isMuted));
     }
   }, []);
+
 
   const toggleMute = () => {
     const newVal = !muted;
@@ -284,114 +321,69 @@ export default function OrdersPage() {
   };
 
   const handlePrintKOT = (order: Order) => {
+    const escapeHtml = (str: any) =>
+     String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
     const printWindow = window.open("", "_blank");
     if (!printWindow) {
       toast.error("Popup blocker prevented printing. Please allow popups.");
       return;
     }
 
+    const orderTotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
     const itemsHtml = order.items
       .map(
-        (item) => `
-      <tr>
-        <td style="padding: 6px 0; font-size: 14px;">${item.name}</td>
-        <td style="padding: 6px 0; text-align: right; font-size: 14px; font-weight: bold;">x${item.quantity}</td>
-      </tr>
-    `
+        (item) => `<tr>
+        <td style="padding:2px 0;font-size:11px;">${escapeHtml(item.name)}</td>
+        <td style="padding:2px 0;text-align:center;font-size:11px;">${escapeHtml(item.quantity)}</td>
+        <td style="padding:2px 0;text-align:right;font-size:11px;">${Number(item.price).toFixed(0)}</td>
+        <td style="padding:2px 0;text-align:right;font-size:11px;font-weight:bold;">${(Number(item.price) * Number(item.quantity)).toFixed(0)}</td>
+      </tr>`
       )
       .join("");
 
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>KOT - Table ${order.tableNumber}</title>
-          <style>
-            body {
-              font-family: 'Courier New', Courier, monospace;
-              padding: 10px;
-              width: 280px;
-              color: #000;
-              margin: 0;
-            }
-            .header {
-              text-align: center;
-              border-bottom: 2px dashed #000;
-              padding-bottom: 10px;
-              margin-bottom: 10px;
-            }
-            .title {
-              font-size: 20px;
-              font-weight: bold;
-              margin: 4px 0;
-            }
-            .details {
-              font-size: 12px;
-              margin-bottom: 10px;
-              line-height: 1.4;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              margin-bottom: 10px;
-            }
-            .totals {
-              border-top: 1px dashed #000;
-              padding-top: 6px;
-              font-weight: bold;
-              margin-top: 6px;
-            }
-            .note {
-              background: #eee;
-              padding: 8px;
-              font-size: 12px;
-              margin-top: 10px;
-              border-left: 3px solid #000;
-            }
-            @media print {
-              body { width: 100%; }
-            }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <div class="title">KITCHEN ORDER TOKEN</div>
-            <div style="font-size: 12px; margin-top: 2px;">Table Number</div>
-            <div style="font-size: 32px; font-weight: 900; margin: 4px 0;">TABLE ${order.tableNumber}</div>
-          </div>
-          <div class="details">
-            <div>Token: #${order.id.slice(-6).toUpperCase()}</div>
-            <div>Time: ${order.createdAt.toLocaleTimeString()}</div>
-            <div>Date: ${order.createdAt.toLocaleDateString()}</div>
-            ${order.customerName ? `<div style="margin-top:6px;font-weight:bold;">Customer: ${order.customerName}</div>` : ''}
-          </div>
-          <table>
-            <thead>
-              <tr style="border-bottom: 1px solid #000;">
-                <th style="text-align: left; padding-bottom: 4px; font-size: 12px;">ITEM</th>
-                <th style="text-align: right; padding-bottom: 4px; font-size: 12px;">QTY</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${itemsHtml}
-            </tbody>
-          </table>
-          ${
-            order.customerNote
-              ? `<div class="note"><strong>INSTRUCTION:</strong> "${order.customerNote}"</div>`
-              : ""
-          }
-          <div style="text-align: center; margin-top: 20px; font-size: 10px; border-top: 1px dashed #000; padding-top: 10px;">
-            CafeQR SaaS • Real-time Order System
-          </div>
-          <script>
-            window.onload = function() {
-              window.print();
-              setTimeout(function() { window.close(); }, 500);
-            };
-          </script>
-        </body>
-      </html>
-    `);
+    printWindow.document.write(`<html><head><title>KOT</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Courier New',monospace;padding:4px;width:48mm;color:#000;font-size:11px;line-height:1.3}
+.hdr{text-align:center;border-bottom:1px dashed #000;padding-bottom:4px;margin-bottom:4px}
+.hdr .t{font-size:13px;font-weight:900;letter-spacing:1px}
+.hdr .tbl{font-size:22px;font-weight:900;margin:2px 0}
+.det{font-size:10px;margin-bottom:4px}
+table{width:100%;border-collapse:collapse}
+th{font-size:9px;padding-bottom:2px;border-bottom:1px solid #000}
+.tot{border-top:1px dashed #000;padding-top:3px;margin-top:3px;display:flex;justify-content:space-between;font-size:13px;font-weight:900}
+.nt{background:#eee;padding:3px 4px;font-size:9px;margin-top:4px;border-left:2px solid #000}
+.ft{text-align:center;margin-top:6px;font-size:8px;border-top:1px dashed #000;padding-top:4px;color:#555}
+@media print{body{width:100%}@page{margin:0}}
+</style></head><body>
+<div class="hdr">
+<div class="t">KOT</div>
+<div class="tbl">T-${escapeHtml(order.tableNumber)}</div>
+</div>
+<div class="det">
+#${escapeHtml(order.id.slice(-6).toUpperCase())} | ${order.createdAt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} | ${order.createdAt.toLocaleDateString()}${order.customerName ? `<br><b>${escapeHtml(order.customerName)}</b>` : ''}
+</div>
+<table>
+<thead><tr>
+<th style="text-align:left">Item</th>
+<th style="text-align:center;width:20px">Qt</th>
+<th style="text-align:right;width:30px">Rate</th>
+<th style="text-align:right;width:34px">Amt</th>
+</tr></thead>
+<tbody>${itemsHtml}</tbody>
+</table>
+<div class="tot"><span>TOTAL</span><span>&#8377;${orderTotal.toFixed(0)}</span></div>
+${order.customerNote ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(order.customerNote)}</div>` : ''}
+<div class="ft">CafeQR</div>
+<script>window.onload=function(){window.print();setTimeout(function(){window.close()},500)};</script>
+</body></html>`);
     printWindow.document.close();
   };
 
@@ -554,6 +546,53 @@ export default function OrdersPage() {
       </div>
 
       {/* Stats Overview */}
+
+      {/* Waiter/Bill Calls (customers call waiter / request bill) */}
+      {calls.length > 0 && (
+        <div className="bg-white border border-amber-100 rounded-2xl p-4 shadow-sm flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <BellRing size={16} className="text-amber-500" />
+              <p className="text-sm font-black text-slate-800">Customer Requests</p>
+              <Badge className="bg-amber-100 text-amber-800 border-amber-200">{calls.length} active</Badge>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {calls.slice(0, 6).map((c) => (
+              <div key={c.id} className="flex items-center gap-2 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+                <Badge className="bg-amber-100 text-amber-800 border-amber-200" variant="secondary">
+                  Table {c.tableNumber}
+                </Badge>
+                <p className="text-xs font-bold text-amber-800">
+                  {c.type === "bill" ? "Request Bill" : "Call Waiter"}
+                </p>
+                <p
+                  className={`text-[11px] font-semibold ${
+                    Math.max(0, Math.floor((Date.now() - (c.createdAt?.getTime?.() || 0)) / 60000)) < 2
+                      ? "text-amber-900 bg-amber-200/70 px-2 py-0.5 rounded-full"
+                      : "text-amber-700/90"
+                  }`}
+                >
+                  {Math.max(0, Math.floor((Date.now() - (c.createdAt?.getTime?.() || 0)) / 60000))}m ago
+                </p>
+
+
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 rounded-lg text-xs font-bold border-amber-200 text-amber-700 bg-white hover:bg-amber-100"
+                  onClick={() => handleResolveCall(c.id)}
+                >
+                  Resolve
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm flex items-center gap-3">
           <div className="w-10 h-10 bg-emerald-50 text-emerald-600 rounded-xl flex items-center justify-center shadow-inner">
