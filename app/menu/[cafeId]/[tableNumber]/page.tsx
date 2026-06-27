@@ -564,11 +564,11 @@ export default function CustomerMenuPage() {
             </div>
 
             <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
-              <SheetTrigger asChild>
-  <Button className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs px-5 py-5 rounded-xl flex items-center gap-1.5 shadow-lg shadow-emerald-500/10">
-    View Order <ChevronRight className="w-4 h-4" />
-  </Button>
-</SheetTrigger>
+              <SheetTrigger>
+                <Button className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs px-5 py-5 rounded-xl flex items-center gap-1.5 shadow-lg shadow-emerald-500/10">
+                  View Order <ChevronRight className="w-4 h-4" />
+                </Button>
+              </SheetTrigger>
               <SheetContent side="bottom" className="rounded-t-[30px] p-6 max-h-[85vh] overflow-y-auto max-w-xl mx-auto border-t border-slate-100">
                 <SheetHeader className="text-left space-y-1 mb-4">
                   <SheetTitle className="text-xl font-black text-slate-900 flex justify-between items-center">
