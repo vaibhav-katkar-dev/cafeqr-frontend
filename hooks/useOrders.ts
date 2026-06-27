@@ -22,6 +22,11 @@ export interface OrderItem {
 export interface Order {
   id: string;
   tableNumber: number;
+  /**
+   * Optional: used for “per-person/person-session” bills.
+   * Orphan orders (no active session) may be saved without this.
+   */
+  sessionId?: string;
   items: OrderItem[];
   totalPrice: number;
   status: "pending" | "accepted" | "preparing" | "delivered";
@@ -30,6 +35,7 @@ export interface Order {
   createdAt: Date;
   updatedAt: Date;
 }
+
 
 export interface DateRange {
   start: Date;
