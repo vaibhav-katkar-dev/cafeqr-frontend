@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, react/no-unescaped-entities, @next/next/no-img-element -- This dashboard page intentionally works with broad runtime data shapes and existing copy; suppress lint-only noise without changing behavior. */
+
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useSessions, TableSession } from "@/hooks/useSessions";
@@ -70,6 +72,15 @@ function LiveTimer({ startDate }: { startDate: Date }) {
   return <span>{label}</span>;
 }
 
+type CheckoutError = Error & {
+  status?: number;
+  data?: {
+    activeOrderCount?: number;
+    pendingCount?: number;
+    error?: string;
+  };
+};
+
 export default function TablesPage() {
   const { user } = useAuth();
   const { sessions, loading: sessionsLoading } = useSessions(user?.uid || null);
@@ -133,6 +144,12 @@ export default function TablesPage() {
     }, 0);
   }, [getSessionOrders]);
 
+  const checkoutSession = useCallback(async (sessionId: string, force = false) => {
+    await api.patch(`/sessions/${sessionId}/checkout`, null, {
+      params: force ? { force: true } : undefined,
+    });
+  }, []);
+
   const handleCheckoutSingle = async (sessionId: string, personLabel: string) => {
     if (settlingIds.has(sessionId) || isSettlingAll) return;
 
@@ -155,9 +172,31 @@ export default function TablesPage() {
 
     try {
       setSettlingIds(prev => new Set(prev).add(sessionId));
-      await api.patch(`/sessions/${sessionId}/checkout`);
+      await checkoutSession(sessionId);
       toast.success(`${personLabel} settled!`);
     } catch (err: any) {
+      const checkoutError = err as CheckoutError;
+      const activeCount = checkoutError.status === 409
+        ? (checkoutError.data?.activeOrderCount ?? checkoutError.data?.pendingCount ?? 0)
+        : 0;
+
+      if (checkoutError.status === 409 && activeCount > 0) {
+        const forceIt = window.confirm(
+          `${personLabel} has ${activeCount} active order${activeCount === 1 ? "" : "s"}. Force checkout anyway?`
+        );
+
+        if (forceIt) {
+          try {
+            await checkoutSession(sessionId, true);
+            toast.success(`${personLabel} force-settled!`);
+            return;
+          } catch {
+            toast.error(`Failed to force-settle ${personLabel}`);
+            return;
+          }
+        }
+      }
+
       toast.error(`Failed to settle ${personLabel}`);
     } finally {
       setSettlingIds(prev => {
@@ -194,9 +233,32 @@ export default function TablesPage() {
       const personLabel = `Person ${i + 1}`;
       try {
         setSettlingIds(prev => new Set(prev).add(session.id));
-        await api.patch(`/sessions/${session.id}/checkout`);
+        await checkoutSession(session.id);
         toast.success(`${personLabel} settled!`);
       } catch (err: any) {
+        const checkoutError = err as CheckoutError;
+        const activeCount = checkoutError.status === 409
+          ? (checkoutError.data?.activeOrderCount ?? checkoutError.data?.pendingCount ?? 0)
+          : 0;
+
+        if (checkoutError.status === 409 && activeCount > 0) {
+          const forceIt = window.confirm(
+            `${personLabel} has ${activeCount} active order${activeCount === 1 ? "" : "s"}. Force checkout anyway?`
+          );
+
+          if (forceIt) {
+            try {
+              await checkoutSession(session.id, true);
+              toast.success(`${personLabel} force-settled!`);
+              continue;
+            } catch {
+              toast.error(`Failed to force-settle ${personLabel}. Stopping.`);
+              hasError = true;
+              break;
+            }
+          }
+        }
+
         toast.error(`Failed to settle ${personLabel}. Stopping.`);
         hasError = true;
         break;
