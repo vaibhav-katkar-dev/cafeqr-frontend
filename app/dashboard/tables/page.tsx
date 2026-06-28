@@ -80,7 +80,7 @@ export default function TablesPage() {
   const [loadingTables, setLoadingTables] = useState(true);
 
   const [selectedTable, setSelectedTable] = useState<number | null>(null);
-  
+
   // Safety Rules states
   const [settlingIds, setSettlingIds] = useState<Set<string>>(new Set());
   const [isSettlingAll, setIsSettlingAll] = useState(false);
@@ -144,7 +144,7 @@ export default function TablesPage() {
 
     const sessOrders = getSessionOrders(sessionId);
     const pending = sessOrders.filter((o: any) => ["pending", "accepted", "preparing"].includes(o.status));
-    
+
     if (pending.length > 0) {
       if (!window.confirm(`${personLabel} has ${pending.length} orders still being prepared. Settle anyway?`)) {
         return;
@@ -217,12 +217,12 @@ export default function TablesPage() {
 
   const handlePrintBill = (tableNumber: number) => {
     const escapeHtml = (str: any) =>
-     String(str ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+      String(str ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 
     const printWindow = window.open("", "_blank");
     if (!printWindow) {
@@ -272,7 +272,7 @@ th{font-size:9px;padding-bottom:2px;border-bottom:1px solid #000}
 <div class="tbl">T-${escapeHtml(tableNumber)}</div>
 </div>
 <div class="det">
-${new Date().toLocaleDateString()} | ${new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+${new Date().toLocaleDateString()} | ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
 </div>
 <table>
 <thead><tr>
@@ -341,7 +341,7 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
 
   const handleAddItemsSubmit = async () => {
     if (!selectedSessionIdForAdd || itemsToAdd.length === 0) return;
-    
+
     const stillActive = sessions.find(s => s.id === selectedSessionIdForAdd && s.status === 'active');
     if (!stillActive) {
       toast.error("This person already checked out. Please refresh.");
@@ -466,34 +466,33 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
       const activeTableSessions = sessions.filter(s => s.tableNumber === i && s.status === 'active');
       const activeSessionIds = activeTableSessions.map(s => s.id);
       const allTableOrders = orders.filter((o: any) => o.tableNumber === i && o.status !== "cancelled");
-      
+
       // Only include orders that belong to an active session, OR have absolutely no session (true orphans)
-      const tableOrders = allTableOrders.filter((o: any) => 
+      const tableOrders = allTableOrders.filter((o: any) =>
         activeSessionIds.includes(o.sessionId) || !o.sessionId
       );
-      
+
       const pendingCount = tableOrders.filter((o: any) => ["pending", "accepted", "preparing"].includes(o.status)).length;
       const deliveredCount = tableOrders.filter((o: any) => o.status === "delivered").length;
       const totalItems = tableOrders.reduce((s: number, o: any) => s + o.items.reduce((n: number, it: any) => n + it.quantity, 0), 0);
-      
-      const earliestSession = activeTableSessions.sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime())[0] || null;
-      const totalTableAmount = activeTableSessions.reduce((sum, s) => sum + (s.totalAmount || 0), 0) + 
-        tableOrders.filter(o => !o.sessionId).reduce((sum, o) => sum + o.items.reduce((s: number, it: any) => s + it.price * it.quantity, 0), 0);
-        
-      const isOccupied = activeTableSessions.length > 0 || tableOrders.filter(o => !o.sessionId).length > 0;
-      const qr = qrCodes.find((q) => q.table === i) || null;
-      
-      arr.push({ 
-        number: i, 
-        session: earliestSession, 
+
+      const earliestSession = activeTableSessions.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0] || null;
+      const totalTableAmount = activeTableSessions.reduce((sum, s) => sum + (s.totalAmount || 0), 0) +
+        tableOrders.filter((o: any) => !o.sessionId).reduce((sum: number, o: any) => sum + o.items.reduce((s: number, it: any) => s + it.price * it.quantity, 0), 0);
+
+      const isOccupied = activeTableSessions.length > 0 || tableOrders.filter((o: any) => !o.sessionId).length > 0; const qr = qrCodes.find((q) => q.table === i) || null;
+
+      arr.push({
+        number: i,
+        session: earliestSession,
         isOccupied,
         totalTableAmount,
         activeSessions: activeTableSessions,
-        qr, 
-        tableOrders, 
-        pendingCount, 
-        deliveredCount, 
-        totalItems 
+        qr,
+        tableOrders,
+        pendingCount,
+        deliveredCount,
+        totalItems
       });
     }
     return arr;
@@ -646,37 +645,33 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
             return (
               <Card
                 key={table.number}
-                className={`border-2 transition-all duration-200 cursor-pointer group relative overflow-hidden flex flex-col ${
-                  isOccupied
+                className={`border-2 transition-all duration-200 cursor-pointer group relative overflow-hidden flex flex-col ${isOccupied
                     ? isLongStay
                       ? "border-red-300 bg-gradient-to-b from-red-50 to-red-50/60 hover:border-red-400 hover:shadow-lg hover:shadow-red-100"
                       : "border-amber-300 bg-gradient-to-b from-amber-50 to-orange-50/40 hover:border-amber-400 hover:shadow-lg hover:shadow-amber-100"
                     : "border-emerald-100 bg-gradient-to-b from-white to-emerald-50/30 hover:border-emerald-300 hover:shadow-md hover:shadow-emerald-50"
-                }`}
+                  }`}
                 onClick={() => setSelectedTable(table.number)}
               >
-                <div className={`absolute top-2.5 right-2.5 w-2.5 h-2.5 rounded-full shadow-sm ${
-                  isOccupied ? (isLongStay ? "bg-red-500 shadow-red-300" : "bg-amber-500 shadow-amber-300") : "bg-emerald-500 shadow-emerald-300"
-                } ${isOccupied ? "animate-pulse" : ""}`} />
+                <div className={`absolute top-2.5 right-2.5 w-2.5 h-2.5 rounded-full shadow-sm ${isOccupied ? (isLongStay ? "bg-red-500 shadow-red-300" : "bg-amber-500 shadow-amber-300") : "bg-emerald-500 shadow-emerald-300"
+                  } ${isOccupied ? "animate-pulse" : ""}`} />
 
                 <CardContent className="p-3 sm:p-4 flex flex-col items-center justify-start text-center space-y-2 sm:space-y-2.5 flex-1">
-                  <div className={`w-13 h-13 w-14 h-14 rounded-2xl flex items-center justify-center font-black text-2xl shadow-md border-2 transition-all ${
-                    isOccupied
+                  <div className={`w-13 h-13 w-14 h-14 rounded-2xl flex items-center justify-center font-black text-2xl shadow-md border-2 transition-all ${isOccupied
                       ? isLongStay
                         ? "border-red-200 bg-red-500 text-white shadow-red-200"
                         : "border-amber-200 bg-amber-500 text-white shadow-amber-200"
                       : "border-emerald-100 bg-emerald-500 text-white shadow-emerald-200"
-                  }`}>
+                    }`}>
                     {table.number}
                   </div>
 
-                  <Badge className={`text-[10px] font-bold w-full justify-center py-1 border-none ${
-                    isOccupied
+                  <Badge className={`text-[10px] font-bold w-full justify-center py-1 border-none ${isOccupied
                       ? isLongStay
                         ? "bg-red-100 text-red-700"
                         : "bg-amber-100 text-amber-800"
                       : "bg-emerald-100 text-emerald-700"
-                  }`}>
+                    }`}>
                     {isOccupied ? (isLongStay ? "⏰ Long Stay" : "● Occupied") : "✓ Free"}
                   </Badge>
 
@@ -866,9 +861,9 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
       <Dialog open={!!selectedTable} onOpenChange={(open) => !open && !isSettlingAll && setSelectedTable(null)}>
         <DialogContent showCloseButton={false} className="w-[95vw] max-w-xl p-0 overflow-hidden gap-0 rounded-2xl">
           {selectedTable && (() => {
-            const tableSessions = sessions.filter(s => 
+            const tableSessions = sessions.filter(s =>
               s.tableNumber === selectedTable && s.status === "active"
-            ).sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime());
+            ).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 
             const orphanOrders = orders.filter((o: any) =>
               o.tableNumber === selectedTable &&
@@ -876,12 +871,12 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
               !o.sessionId
             );
 
-            const tableTotal = tableSessions.reduce((sum, s) => sum + getSessionTotal(s.id), 0) + 
+            const tableTotal = tableSessions.reduce((sum, s) => sum + getSessionTotal(s.id), 0) +
               orphanOrders.reduce((sum: number, o: any) => sum + o.items.reduce((s: number, i: any) => s + i.price * i.quantity, 0), 0);
 
             return (
               <div className="flex flex-col max-h-[85vh]">
-                
+
                 {/* Header */}
                 <div className="px-4 sm:px-6 py-4 border-b border-slate-100 flex-shrink-0 flex items-center justify-between bg-white">
                   <div>
@@ -894,7 +889,7 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                     </DialogTitle>
                   </div>
                   <div className="flex items-center gap-3">
-                    <Button 
+                    <Button
                       variant="outline"
                       onClick={() => setPersonPickerOpen(true)}
                       className="rounded-xl border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 font-bold text-xs h-9 px-3"
@@ -925,7 +920,7 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                     const sessOrders = getSessionOrders(session.id);
                     const total = getSessionTotal(session.id);
                     const isSettling = settlingIds.has(session.id);
-                    
+
                     return (
                       <div key={session.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm mb-4">
                         <div className="flex items-center justify-between py-3 px-4 border-b border-slate-100 bg-slate-50">
@@ -934,7 +929,7 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                           </div>
                           <div className="font-black text-slate-900">₹{total.toFixed(2)}</div>
                         </div>
-                        
+
                         <div className="overflow-x-auto">
                           <table className="w-full text-left text-sm text-slate-600 min-w-[320px]">
                             <tbody className="divide-y divide-slate-100">
@@ -964,10 +959,10 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                             </tbody>
                           </table>
                         </div>
-                        
+
                         <div className="p-3 border-t border-slate-100 bg-slate-50">
-                          <Button 
-                            disabled={isSettlingAll || isSettling} 
+                          <Button
+                            disabled={isSettlingAll || isSettling}
                             onClick={() => handleCheckoutSingle(session.id, personLabel)}
                             className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold h-10 shadow-md"
                           >
@@ -978,7 +973,7 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                       </div>
                     )
                   })}
-                  
+
                   {orphanOrders.length > 0 && (
                     <div className="bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm mb-4">
                       <div className="flex items-center justify-between py-3 px-4 border-b border-red-200 bg-red-100">
@@ -996,17 +991,17 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                         <table className="w-full text-left text-sm text-red-700 min-w-[320px]">
                           <tbody className="divide-y divide-red-200/50">
                             {orphanOrders.map((order: any) => order.items.map((item: any, idx: number) => (
-                               <tr key={`${order.id}-${idx}`} className="group hover:bg-red-100/50">
-                                  <td className="px-4 py-2 font-semibold text-xs sm:text-sm">{item.name}</td>
-                                  <td className="px-2 py-2 font-bold opacity-70 text-center text-xs sm:text-sm">×{item.quantity}</td>
-                                  <td className="px-2 py-2 opacity-60 text-[10px] sm:text-xs text-center">₹{item.price}</td>
-                                  <td className="px-2 py-2 font-bold text-right text-xs sm:text-sm">₹{(item.price * item.quantity).toFixed(0)}</td>
-                                  <td className="px-2 py-2 text-center w-10">
-                                    <button onClick={(e) => { e.stopPropagation(); handleRemoveItem(order.id, order.items, idx); }} className="w-6 h-6 flex items-center justify-center rounded-md bg-red-200 text-red-700 hover:bg-red-600 hover:text-white transition-all shadow-sm opacity-0 group-hover:opacity-100">
-                                      <Trash2 size={12} />
-                                    </button>
-                                  </td>
-                               </tr>
+                              <tr key={`${order.id}-${idx}`} className="group hover:bg-red-100/50">
+                                <td className="px-4 py-2 font-semibold text-xs sm:text-sm">{item.name}</td>
+                                <td className="px-2 py-2 font-bold opacity-70 text-center text-xs sm:text-sm">×{item.quantity}</td>
+                                <td className="px-2 py-2 opacity-60 text-[10px] sm:text-xs text-center">₹{item.price}</td>
+                                <td className="px-2 py-2 font-bold text-right text-xs sm:text-sm">₹{(item.price * item.quantity).toFixed(0)}</td>
+                                <td className="px-2 py-2 text-center w-10">
+                                  <button onClick={(e) => { e.stopPropagation(); handleRemoveItem(order.id, order.items, idx); }} className="w-6 h-6 flex items-center justify-center rounded-md bg-red-200 text-red-700 hover:bg-red-600 hover:text-white transition-all shadow-sm opacity-0 group-hover:opacity-100">
+                                    <Trash2 size={12} />
+                                  </button>
+                                </td>
+                              </tr>
                             )))}
                           </tbody>
                         </table>
@@ -1060,7 +1055,7 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
           <div className="p-5">
             <label className="text-xs font-bold text-slate-600 mb-3 block uppercase tracking-wider">Select Person to Bill</label>
             <div className="flex flex-col gap-2">
-              {sessions.filter(s => s.tableNumber === selectedTable && s.status === 'active').sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime()).map((s, idx) => (
+              {sessions.filter(s => s.tableNumber === selectedTable && s.status === 'active').sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()).map((s, idx) => (
                 <button
                   key={s.id}
                   onClick={() => {
@@ -1133,9 +1128,8 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                   return (
                     <div
                       key={menuItem.id}
-                      className={`flex items-center gap-3 sm:gap-4 px-4 py-3 sm:py-3.5 rounded-2xl border-2 bg-white transition-all ${
-                        qty > 0 ? "border-purple-300 shadow-sm shadow-purple-100" : "border-slate-200 hover:border-slate-300"
-                      }`}
+                      className={`flex items-center gap-3 sm:gap-4 px-4 py-3 sm:py-3.5 rounded-2xl border-2 bg-white transition-all ${qty > 0 ? "border-purple-300 shadow-sm shadow-purple-100" : "border-slate-200 hover:border-slate-300"
+                        }`}
                     >
                       <div className="flex-1 min-w-0">
                         <p className="font-bold text-sm text-slate-900 leading-snug">{menuItem.name}</p>
@@ -1157,15 +1151,13 @@ ${pendingCount > 0 ? `<div class="nt"><b>NOTE:</b> ${escapeHtml(pendingCount)} o
                             if (ex && ex.quantity > 1) return prev.map(i => i.item.id === menuItem.id ? { ...i, quantity: i.quantity - 1 } : i);
                             return prev.filter(i => i.item.id !== menuItem.id);
                           })}
-                          className={`w-7 h-7 rounded-full border-2 flex items-center justify-center text-base font-black transition-all select-none ${
-                            qty === 0 ? "border-slate-200 text-slate-300 cursor-not-allowed" : "border-red-200 text-red-500 hover:bg-red-500 hover:text-white hover:border-red-500 active:scale-90"
-                          }`}
+                          className={`w-7 h-7 rounded-full border-2 flex items-center justify-center text-base font-black transition-all select-none ${qty === 0 ? "border-slate-200 text-slate-300 cursor-not-allowed" : "border-red-200 text-red-500 hover:bg-red-500 hover:text-white hover:border-red-500 active:scale-90"
+                            }`}
                         >
                           −
                         </button>
-                        <div className={`w-7 h-7 rounded-lg border-2 flex items-center justify-center text-xs font-black transition-all ${
-                          qty > 0 ? "bg-purple-600 border-purple-600 text-white" : "bg-slate-100 border-slate-200 text-slate-400"
-                        }`}>
+                        <div className={`w-7 h-7 rounded-lg border-2 flex items-center justify-center text-xs font-black transition-all ${qty > 0 ? "bg-purple-600 border-purple-600 text-white" : "bg-slate-100 border-slate-200 text-slate-400"
+                          }`}>
                           {qty}
                         </div>
                         <button
