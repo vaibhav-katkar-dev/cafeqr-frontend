@@ -145,7 +145,7 @@ export default function TablesPage() {
   }, [getSessionOrders]);
 
   const checkoutSession = useCallback(async (sessionId: string, force = false) => {
-    await api.patch(`/sessions/${sessionId}/checkout`, null, {
+    await api.patch(`/sessions/${sessionId}/checkout`, {}, {
       params: force ? { force: true } : undefined,
     });
   }, []);
